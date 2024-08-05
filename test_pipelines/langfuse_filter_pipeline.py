@@ -41,7 +41,7 @@ class Pipeline:
             }
         )
         self.langfuse = None
-        self.chat_generations = {}
+        self.traces: dict[str, Langfuse] = {}
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -96,34 +96,38 @@ class Pipeline:
             metadata={"name": user["name"]},
             session_id=body["chat_id"],
         )
-
-        generation = trace.generation(
-            name=body["chat_id"],
-            model=body["model"],
-            input=body["messages"],
-            metadata={"interface": "open-webui"},
-        )
-
-        self.chat_generations[body["chat_id"]] = generation
+        self.traces[body["chat_id"]] = trace
         print(trace.get_trace_url())
 
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"outlet:{__name__}")
-        if body["chat_id"] not in self.chat_generations:
+        if body["chat_id"] not in self.traces:
             return body
 
-        generation = self.chat_generations[body["chat_id"]]
+        trace = self.traces[body["chat_id"]]
 
         user_message = get_last_user_message(body["messages"])
         generated_message = get_last_assistant_message(body["messages"])
 
         timings_dict = body.get("timings_dict", {"error": "Timings failed!"})
-        generation.end(
+        trace.generation(
+            name=body["chat_id"],
+            model=body["model"],
+            input=body["messages"][:-1], # This excludes the last (user) message.
+            output=generated_message,
+            metadata={
+                "interface": "open-webui",
+                "timings_dict": timings_dict,
+            }
+        )
+        throughput_string = timings_dict.get("eval_time", "Throughput not found!")
+        trace.update(
+            input=user_message,
             output=generated_message,
             metadata={"interface": "open-webui",
-                      "timings_dict": timings_dict},
+                      "throughput": throughput_string},
         )
 
         return body
