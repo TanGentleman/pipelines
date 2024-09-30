@@ -1,22 +1,27 @@
 """
 title: Langfuse Filter Pipeline
 author: open-webui
-date: 2024-05-30
-version: 1.1
+date: 2024-09-27
+version: 1.4
 license: MIT
 description: A filter pipeline that uses Langfuse.
 requirements: langfuse
 """
 
 from typing import List, Optional
-from schemas import OpenAIChatMessage
 import os
 import uuid
 
-from utils.pipelines.main import get_last_user_message, get_last_assistant_message
+from utils.pipelines.main import get_last_assistant_message
 from pydantic import BaseModel
 from langfuse import Langfuse
 from langfuse.api.resources.commons.errors.unauthorized_error import UnauthorizedError
+
+def get_last_assistant_message_obj(messages: List[dict]) -> dict:
+    for message in reversed(messages):
+        if message["role"] == "assistant":
+            return message
+    return {}
 
 
 class Pipeline:
@@ -90,8 +95,8 @@ class Pipeline:
         trace = self.langfuse.trace(
             name=f"filter:{__name__}",
             input=body,
-            user_id=user["id"],
-            metadata={"name": user["name"]},
+            user_id=user["email"],
+            metadata={"user_name": user["name"], "user_id": user["id"]},
             session_id=body["chat_id"],
         )
 
@@ -109,21 +114,37 @@ class Pipeline:
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"outlet:{__name__}")
+        print(f"Received body: {body}")
         if body["chat_id"] not in self.chat_generations:
             return body
 
         generation = self.chat_generations[body["chat_id"]]
+        assistant_message = get_last_assistant_message(body["messages"])
 
-        user_message = get_last_user_message(body["messages"])
-        generated_message = get_last_assistant_message(body["messages"])
+        
+        # Extract usage information for models that support it
+        usage = None
+        assistant_message_obj = get_last_assistant_message_obj(body["messages"])
+        if assistant_message_obj:
+            info = assistant_message_obj.get("info", {})
+            if isinstance(info, dict):
+                input_tokens = info.get("prompt_eval_count") or info.get("prompt_tokens")
+                output_tokens = info.get("eval_count") or info.get("completion_tokens")
+                if input_tokens is not None and output_tokens is not None:
+                    usage = {
+                        "input": input_tokens,
+                        "output": output_tokens,
+                        "unit": "TOKENS",
+                    }
 
+        # Update generation
         generation.end(
-            output=generated_message,
-            usage={
-                "totalCost": (len(user_message) + len(generated_message)) / 1000,
-                "unit": "CHARACTERS",
-            },
+            output=assistant_message,
             metadata={"interface": "open-webui"},
+            usage=usage,
         )
+
+        # Clean up the chat_generations dictionary
+        del self.chat_generations[body["chat_id"]]
 
         return body
